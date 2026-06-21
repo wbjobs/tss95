@@ -3,6 +3,8 @@ import ControlPanel from '../components/ControlPanel';
 import StatsPanel from '../components/StatsPanel';
 import ShipTooltip from '../components/ShipTooltip';
 import SimControls from '../components/SimControls';
+import ReplayController from '../components/ReplayController';
+import ShipChartPanel from '../components/ShipChartPanel';
 
 export default function BattlePage() {
   return (
@@ -18,7 +20,7 @@ export default function BattlePage() {
           </h1>
         </div>
         <div className="text-gray-500 text-xs tracking-wider" style={{ fontFamily: 'Source Code Pro, monospace' }}>
-          ECS v1.0 // REAL-TIME
+          ECS v1.0 // REAL-TIME + REPLAY
         </div>
       </header>
 
@@ -26,6 +28,8 @@ export default function BattlePage() {
         <div className="flex-1 relative">
           <BattleCanvas />
           <ShipTooltip />
+          <ReplayController />
+          <ShipChartPanel />
         </div>
 
         <aside className="w-64 border-l border-[#1a2a3a]/60 bg-[#0d1220] flex flex-col overflow-y-auto">

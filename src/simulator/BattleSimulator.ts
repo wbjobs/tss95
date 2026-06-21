@@ -3,7 +3,7 @@ import { createPositionComponent } from '../ecs/components/PositionComponent';
 import { createVelocityComponent } from '../ecs/components/VelocityComponent';
 import { createHealthComponent } from '../ecs/components/HealthComponent';
 import { createWeaponComponent } from '../ecs/components/WeaponComponent';
-import { createAIComponent, type TacticMode } from '../ecs/components/AIComponent';
+import { createAIComponent, type TacticMode, type AIComponent, type AIState } from '../ecs/components/AIComponent';
 import { createTeamComponent, type Team } from '../ecs/components/TeamComponent';
 import { createRenderComponent } from '../ecs/components/RenderComponent';
 import { MovementSystem } from '../ecs/systems/MovementSystem';
@@ -12,6 +12,7 @@ import { AttackSystem } from '../ecs/systems/AttackSystem';
 import { AIDecisionSystem } from '../ecs/systems/AIDecisionSystem';
 import { RenderSystem } from '../ecs/systems/RenderSystem';
 import { randomRange } from '../utils/math';
+import { ReplayStore, type FrameState, type ShipFrameState, type ProjectileFrameState } from './ReplayStore';
 
 export interface TeamStats {
   team: Team;
@@ -49,6 +50,15 @@ export class BattleSimulator {
     ai: 0, attack: 0, movement: 0, collision: 0, total: 0
   };
 
+  replayStore: ReplayStore;
+  isReplayMode: boolean = false;
+  replayFrameIndex: number = 0;
+  replaySpeed: number = 1;
+  replayPlaying: boolean = false;
+  private replayFrameCounter: number = 0;
+  private replayAccumDt: number = 0;
+  private readonly recordInterval: number = 1 / 30;
+
   constructor(width: number, height: number) {
     this.width = width;
     this.height = height;
@@ -58,6 +68,7 @@ export class BattleSimulator {
     this.attackSystem = new AttackSystem();
     this.aiDecisionSystem = new AIDecisionSystem();
     this.renderSystem = new RenderSystem();
+    this.replayStore = new ReplayStore();
 
     this.world.addSystem(this.aiDecisionSystem);
     this.world.addSystem(this.attackSystem);
@@ -130,6 +141,11 @@ export class BattleSimulator {
   }
 
   update(dt: number): void {
+    if (this.isReplayMode) {
+      this.updateReplay(dt);
+      return;
+    }
+
     if (!this.isRunning || this.isFinished) return;
 
     this.battleTime += dt;
@@ -156,6 +172,12 @@ export class BattleSimulator {
     this.processNewKillEvents();
 
     this.checkBattleEnd();
+
+    this.replayAccumDt += dt;
+    if (this.replayAccumDt >= this.recordInterval) {
+      this.replayAccumDt = 0;
+      this.recordFrame();
+    }
   }
 
   private processNewDamageEvents(): void {
@@ -197,7 +219,163 @@ export class BattleSimulator {
       this.isFinished = true;
       this.isRunning = false;
       this.winner = redAlive > 0 ? 'red' : blueAlive > 0 ? 'blue' : null;
+      this.recordFrame();
     }
+  }
+
+  private recordFrame(): void {
+    const ships: ShipFrameState[] = [];
+    const entities = this.world.getEntitiesWith('position', 'health', 'team', 'ai', 'weapon', 'render');
+
+    for (const id of entities) {
+      const pos = this.world.getComponent<{ type: 'position'; x: number; y: number; angle: number }>(id, 'position');
+      const health = this.world.getComponent<{ type: 'health'; hp: number; maxHp: number; alive: boolean }>(id, 'health');
+      const team = this.world.getComponent<{ type: 'team'; team: Team }>(id, 'team');
+      const ai = this.world.getComponent<{ type: 'ai'; state: AIState; targetId: number | null }>(id, 'ai');
+      const weapon = this.world.getComponent<{ type: 'weapon'; cooldown: number }>(id, 'weapon');
+      const render = this.world.getComponent<{ type: 'render'; size: number }>(id, 'render');
+
+      if (!pos || !health || !team || !ai || !weapon || !render) continue;
+
+      ships.push({
+        id,
+        team: team.team,
+        x: pos.x,
+        y: pos.y,
+        angle: pos.angle,
+        hp: health.hp,
+        maxHp: health.maxHp,
+        alive: health.alive,
+        aiState: ai.state,
+        targetId: ai.targetId,
+        weaponCooldown: weapon.cooldown,
+        size: render.size,
+      });
+    }
+
+    const projectiles: ProjectileFrameState[] = this.attackSystem.projectiles.map((p) => ({
+      id: p.id,
+      x: p.x,
+      y: p.y,
+      team: p.team,
+    }));
+
+    const frame: FrameState = {
+      frameIndex: this.replayFrameCounter++,
+      timestamp: this.battleTime,
+      ships,
+      projectiles,
+      redAlive: this.getAliveCount('red'),
+      blueAlive: this.getAliveCount('blue'),
+    };
+
+    this.replayStore.addFrame(frame);
+  }
+
+  startReplay(): void {
+    if (!this.replayStore.hasData()) return;
+    this.isReplayMode = true;
+    this.replayFrameIndex = 0;
+    this.replayPlaying = true;
+    this.replayAccumDt = 0;
+    this.applyFrame(this.replayStore.getFrame(0));
+  }
+
+  stopReplay(): void {
+    this.isReplayMode = false;
+    this.replayPlaying = false;
+  }
+
+  setReplayFrame(index: number): void {
+    const frame = this.replayStore.getFrame(index);
+    if (frame) {
+      this.replayFrameIndex = index;
+      this.applyFrame(frame);
+    }
+  }
+
+  toggleReplayPlay(): void {
+    this.replayPlaying = !this.replayPlaying;
+  }
+
+  setReplaySpeed(speed: number): void {
+    this.replaySpeed = Math.max(0.1, Math.min(8, speed));
+  }
+
+  private updateReplay(dt: number): void {
+    if (!this.replayPlaying) return;
+
+    const totalFrames = this.replayStore.getTotalFrames();
+    if (totalFrames === 0) return;
+
+    this.replayAccumDt += dt * this.replaySpeed / this.recordInterval;
+    const advance = Math.floor(this.replayAccumDt);
+    this.replayAccumDt -= advance;
+
+    let newIndex = this.replayFrameIndex + advance;
+    if (newIndex >= totalFrames) {
+      newIndex = totalFrames - 1;
+      this.replayPlaying = false;
+    }
+    if (newIndex < 0) newIndex = 0;
+
+    if (newIndex !== this.replayFrameIndex) {
+      this.replayFrameIndex = newIndex;
+      const frame = this.replayStore.getFrame(newIndex);
+      if (frame) {
+        this.applyFrame(frame);
+      }
+    }
+  }
+
+  private applyFrame(frame: FrameState | null): void {
+    if (!frame) return;
+
+    this.battleTime = frame.timestamp;
+    this.redDamageAccum = 0;
+    this.blueDamageAccum = 0;
+
+    const entities = this.world.getEntitiesWith('position', 'health', 'team', 'ai', 'weapon', 'render');
+
+    const shipMap = new Map(frame.ships.map((s) => [s.id, s]));
+
+    for (const id of entities) {
+      const pos = this.world.getComponent<{ type: 'position'; x: number; y: number; angle: number }>(id, 'position');
+      const health = this.world.getComponent<{ type: 'health'; hp: number; maxHp: number; alive: boolean }>(id, 'health');
+      const ai = this.world.getComponent<{ type: 'ai'; state: AIState; targetId: number | null }>(id, 'ai');
+      const weapon = this.world.getComponent<{ type: 'weapon'; cooldown: number }>(id, 'weapon');
+      const render = this.world.getComponent<{ type: 'render'; size: number; flashTimer: number }>(id, 'render');
+      const vel = this.world.getComponent<{ type: 'velocity'; vx: number; vy: number }>(id, 'velocity');
+
+      const shipState = shipMap.get(id);
+      if (pos && health && ai && weapon && render && vel && shipState) {
+        pos.x = shipState.x;
+        pos.y = shipState.y;
+        pos.angle = shipState.angle;
+        health.hp = shipState.hp;
+        health.maxHp = shipState.maxHp;
+        health.alive = shipState.alive;
+        ai.state = shipState.aiState;
+        ai.targetId = shipState.targetId;
+        weapon.cooldown = shipState.weaponCooldown;
+        render.flashTimer = 0;
+        vel.vx = 0;
+        vel.vy = 0;
+      }
+    }
+
+    this.attackSystem.projectiles = frame.projectiles.map((p) => ({
+      id: p.id,
+      x: p.x,
+      y: p.y,
+      vx: 0,
+      vy: 0,
+      sourceId: 0,
+      team: p.team,
+      damage: 0,
+      life: 1,
+      maxLife: 1,
+    }));
   }
 
   getAliveCount(team: Team): number {
@@ -239,31 +417,38 @@ export class BattleSimulator {
   }
 
   getShipInfo(id: number): {
+    id: number;
     hp: number;
     maxHp: number;
     weaponCooldown: number;
     maxCooldown: number;
     aiState: string;
+    targetId: number | null;
     team: Team;
     x: number;
     y: number;
+    size: number;
   } | null {
     const pos = this.world.getComponent<{ type: 'position'; x: number; y: number }>(id, 'position');
     const health = this.world.getComponent<{ type: 'health'; hp: number; maxHp: number }>(id, 'health');
     const weapon = this.world.getComponent<{ type: 'weapon'; cooldown: number; maxCooldown: number }>(id, 'weapon');
-    const ai = this.world.getComponent<{ type: 'ai'; state: string }>(id, 'ai');
+    const ai = this.world.getComponent<{ type: 'ai'; state: string; targetId: number | null }>(id, 'ai');
     const team = this.world.getComponent<{ type: 'team'; team: Team }>(id, 'team');
-    if (!pos || !health || !weapon || !ai || !team) return null;
+    const render = this.world.getComponent<{ type: 'render'; size: number }>(id, 'render');
+    if (!pos || !health || !weapon || !ai || !team || !render) return null;
 
     return {
+      id,
       hp: health.hp,
       maxHp: health.maxHp,
       weaponCooldown: weapon.cooldown,
       maxCooldown: weapon.maxCooldown,
       aiState: ai.state,
+      targetId: ai.targetId,
       team: team.team,
       x: pos.x,
       y: pos.y,
+      size: render.size,
     };
   }
 
@@ -296,5 +481,10 @@ export class BattleSimulator {
     this.lastDamageEventIdx = 0;
     this.lastKillEventIdx = 0;
     this.renderSystem = new RenderSystem();
+    this.replayStore.clear();
+    this.isReplayMode = false;
+    this.replayFrameIndex = 0;
+    this.replayFrameCounter = 0;
+    this.replayAccumDt = 0;
   }
 }

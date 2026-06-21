@@ -41,6 +41,10 @@ export class AttackSystem extends System {
     return this._projectiles;
   }
 
+  set projectiles(value: Projectile[]) {
+    this._projectiles = value;
+  }
+
   get damageEvents(): DamageEvent[] {
     return this._damageEvents;
   }

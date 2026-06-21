@@ -21,6 +21,9 @@ export default function BattleCanvas() {
   const updateStats = useBattleStore((s) => s.updateStats);
   const setHoveredShip = useBattleStore((s) => s.setHoveredShip);
   const hoveredShipId = useBattleStore((s) => s.hoveredShipId);
+  const setSelectedShipForChart = useBattleStore((s) => s.setSelectedShipForChart);
+  const selectedShipIdForChart = useBattleStore((s) => s.selectedShipIdForChart);
+  const setReplayFrame = useBattleStore((s) => s.setReplayFrame);
 
   const updateSize = useCallback(() => {
     const container = containerRef.current;
@@ -89,6 +92,10 @@ export default function BattleCanvas() {
 
       simulator.update(dt);
 
+      if (simulator.isReplayMode) {
+        setReplayFrame(simulator.replayFrameIndex);
+      }
+
       simulator.renderSystem.setContext(ctx, rect.width, rect.height);
       simulator.renderSystem.update(simulator.world, dt);
       simulator.renderSystem.renderProjectiles(simulator.attackSystem.projectiles);
@@ -126,6 +133,21 @@ export default function BattleCanvas() {
       ctx.fillText(`Total: ${perfRef.current.update.toFixed(2)}ms`, px, py + lineH * 5);
       const shipCount = simulator.world.getEntityCount();
       ctx.fillText(`Ships: ${shipCount}`, px, py + lineH * 6);
+
+      if (simState === 'replay' && selectedShipIdForChart !== null) {
+        const info = simulator.getShipInfo(selectedShipIdForChart);
+        if (info) {
+          ctx.save();
+          ctx.strokeStyle = info.team === 'red' ? '#ff3366' : '#4488ff';
+          ctx.lineWidth = 2;
+          ctx.setLineDash([4, 4]);
+          ctx.beginPath();
+          ctx.arc(info.x, info.y, info.size + 8, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+
       ctx.restore();
 
       updateStats();
@@ -140,7 +162,7 @@ export default function BattleCanvas() {
         cancelAnimationFrame(animFrameRef.current);
       }
     };
-  }, [simulator, speed, updateStats]);
+  }, [simulator, speed, updateStats, simState, selectedShipIdForChart, setReplayFrame]);
 
   const handleMouseMove = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -172,6 +194,34 @@ export default function BattleCanvas() {
     setHoveredShip(null);
   }, [setHoveredShip]);
 
+  const handleClick = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (!simulator || simState !== 'replay') return;
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+
+      const ships = simulator.getAllAliveShips();
+      let closestId: number | null = null;
+      let closestDist = 25;
+
+      for (const ship of ships) {
+        const dist = distance(mx, my, ship.x, ship.y);
+        if (dist < closestDist) {
+          closestDist = dist;
+          closestId = ship.id;
+        }
+      }
+
+      if (closestId !== null) {
+        setSelectedShipForChart(closestId === selectedShipIdForChart ? null : closestId);
+      }
+    },
+    [simulator, simState, selectedShipIdForChart, setSelectedShipForChart]
+  );
+
   return (
     <div ref={containerRef} className="relative w-full h-full overflow-hidden">
       <canvas
@@ -179,6 +229,7 @@ export default function BattleCanvas() {
         className="absolute inset-0"
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
+        onClick={handleClick}
       />
       {simState === 'idle' && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">

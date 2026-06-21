@@ -3,7 +3,7 @@ import { BattleSimulator, type TeamStats } from '../simulator/BattleSimulator';
 import type { TacticMode } from '../ecs/components/AIComponent';
 import type { Team } from '../ecs/components/TeamComponent';
 
-export type SimState = 'idle' | 'running' | 'paused' | 'finished';
+export type SimState = 'idle' | 'running' | 'paused' | 'finished' | 'replay';
 
 interface BattleStore {
   simulator: BattleSimulator | null;
@@ -18,6 +18,11 @@ interface BattleStore {
   battleTime: number;
   winner: Team | null;
   hoveredShipId: number | null;
+  replayFrameIndex: number;
+  replayTotalFrames: number;
+  replayPlaying: boolean;
+  replaySpeed: number;
+  selectedShipIdForChart: number | null;
 
   initSimulator: (width: number, height: number) => void;
   startBattle: () => void;
@@ -33,6 +38,12 @@ interface BattleStore {
   removeShips: (team: Team, count: number) => void;
   updateStats: () => void;
   setHoveredShip: (id: number | null) => void;
+  startReplay: () => void;
+  stopReplay: () => void;
+  setReplayFrame: (index: number) => void;
+  toggleReplayPlay: () => void;
+  setReplaySpeed: (speed: number) => void;
+  setSelectedShipForChart: (id: number | null) => void;
 }
 
 export const useBattleStore = create<BattleStore>((set, get) => ({
@@ -48,6 +59,11 @@ export const useBattleStore = create<BattleStore>((set, get) => ({
   battleTime: 0,
   winner: null,
   hoveredShipId: null,
+  replayFrameIndex: 0,
+  replayTotalFrames: 0,
+  replayPlaying: false,
+  replaySpeed: 1,
+  selectedShipIdForChart: null,
 
   initSimulator: (width, height) => {
     const sim = new BattleSimulator(width, height);
@@ -121,7 +137,7 @@ export const useBattleStore = create<BattleStore>((set, get) => ({
   },
 
   updateStats: () => {
-    const { simulator } = get();
+    const { simulator, simState } = get();
     if (!simulator) return;
     const redStats = simulator.getTeamStats('red');
     const blueStats = simulator.getTeamStats('blue');
@@ -130,10 +146,56 @@ export const useBattleStore = create<BattleStore>((set, get) => ({
       blueStats,
       battleTime: simulator.battleTime,
     });
-    if (simulator.isFinished) {
+    if (simulator.isFinished && simState !== 'replay') {
       set({ simState: 'finished', winner: simulator.winner });
     }
   },
 
   setHoveredShip: (id) => set({ hoveredShipId: id }),
+
+  startReplay: () => {
+    const { simulator } = get();
+    if (!simulator || !simulator.replayStore.hasData()) return;
+    simulator.startReplay();
+    set({
+      simState: 'replay',
+      replayFrameIndex: 0,
+      replayTotalFrames: simulator.replayStore.getTotalFrames(),
+      replayPlaying: true,
+      replaySpeed: 1,
+    });
+  },
+
+  stopReplay: () => {
+    const { simulator } = get();
+    if (!simulator) return;
+    simulator.stopReplay();
+    set({
+      simState: 'finished',
+      selectedShipIdForChart: null,
+    });
+  },
+
+  setReplayFrame: (index) => {
+    const { simulator } = get();
+    if (!simulator) return;
+    simulator.setReplayFrame(index);
+    set({ replayFrameIndex: index });
+  },
+
+  toggleReplayPlay: () => {
+    const { simulator, replayPlaying } = get();
+    if (!simulator) return;
+    simulator.toggleReplayPlay();
+    set({ replayPlaying: !replayPlaying });
+  },
+
+  setReplaySpeed: (speed) => {
+    const { simulator } = get();
+    if (!simulator) return;
+    simulator.setReplaySpeed(speed);
+    set({ replaySpeed: speed });
+  },
+
+  setSelectedShipForChart: (id) => set({ selectedShipIdForChart: id }),
 }));
