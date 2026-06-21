@@ -6,12 +6,50 @@ import type { HealthComponent } from '../components/HealthComponent';
 import type { WeaponComponent } from '../components/WeaponComponent';
 import type { AIComponent } from '../components/AIComponent';
 import type { TeamComponent } from '../components/TeamComponent';
-import { distance, angleBetween, normalize } from '../../utils/math';
+import { distance, normalize } from '../../utils/math';
+
+interface ShipData {
+  id: number;
+  pos: PositionComponent;
+  vel: VelocityComponent;
+  health: HealthComponent;
+  weapon: WeaponComponent;
+  ai: AIComponent;
+  team: TeamComponent;
+}
+
+interface TargetData {
+  id: number;
+  pos: PositionComponent;
+  health: HealthComponent;
+  weapon: WeaponComponent;
+  attackers: number;
+  score: number;
+}
 
 export class AIDecisionSystem extends System {
   readonly requiredComponents = ['position', 'velocity', 'health', 'weapon', 'ai', 'team'];
 
+  private redShips: ShipData[] = [];
+  private blueShips: ShipData[] = [];
+  private redTargets: TargetData[] = [];
+  private blueTargets: TargetData[] = [];
+
+  private maxAttackersPerTarget: number = 3;
+  private overkillThreshold: number = 1.5;
+
   update(world: World, _dt: number): void {
+    this.collectEntities(world);
+    this.assignTargets();
+    this.updateBehaviors();
+  }
+
+  private collectEntities(world: World): void {
+    this.redShips = [];
+    this.blueShips = [];
+    this.redTargets = [];
+    this.blueTargets = [];
+
     const entities = world.getEntitiesWith('position', 'velocity', 'health', 'weapon', 'ai', 'team');
 
     for (const id of entities) {
@@ -21,258 +59,265 @@ export class AIDecisionSystem extends System {
       const weapon = world.getComponent<WeaponComponent>(id, 'weapon');
       const ai = world.getComponent<AIComponent>(id, 'ai');
       const team = world.getComponent<TeamComponent>(id, 'team');
-      if (!pos || !vel || !health || !weapon || !ai || !team || !health.alive) continue;
 
-      const hpRatio = health.hp / health.maxHp;
+      if (!pos || !vel || !health || !weapon || !ai || !team) continue;
 
-      if (hpRatio < ai.fleeThreshold) {
-        this.executeFlee(world, id, pos, vel, ai);
+      const data: ShipData = { id, pos, vel, health, weapon, ai, team };
+
+      if (team.team === 'red') {
+        this.redShips.push(data);
+      } else {
+        this.blueShips.push(data);
+      }
+
+      if (health.alive) {
+        const targetData: TargetData = { id, pos, health, weapon, attackers: 0, score: 0 };
+        if (team.team === 'red') {
+          this.redTargets.push(targetData);
+        } else {
+          this.blueTargets.push(targetData);
+        }
+      }
+    }
+  }
+
+  private assignTargets(): void {
+    this.assignTargetsForTeam(this.redShips, this.blueTargets);
+    this.assignTargetsForTeam(this.blueShips, this.redTargets);
+  }
+
+  private assignTargetsForTeam(ships: ShipData[], targets: TargetData[]): void {
+    if (targets.length === 0) {
+      for (const ship of ships) {
+        ship.ai.targetId = null;
+        ship.ai.state = 'idle';
+      }
+      return;
+    }
+
+    for (const target of targets) {
+      target.attackers = 0;
+    }
+
+    for (const ship of ships) {
+      if (!ship.health.alive) {
+        ship.ai.targetId = null;
         continue;
       }
 
-      switch (ai.tacticMode) {
-        case 'focus_fire':
-          this.executeFocusFire(world, id, pos, vel, weapon, ai, team);
-          break;
-        case 'guerrilla':
-          this.executeGuerrilla(world, id, pos, vel, weapon, ai, team);
-          break;
-        default:
-          this.executeDefault(world, id, pos, vel, weapon, ai, team);
-          break;
-      }
-    }
-  }
-
-  private executeFlee(
-    world: World,
-    _id: number,
-    pos: PositionComponent,
-    vel: VelocityComponent,
-    ai: AIComponent
-  ): void {
-    ai.state = 'flee';
-    const nearest = this.findNearestEnemy(world, pos, _id);
-    if (nearest) {
-      const angle = angleBetween(nearest.x, nearest.y, pos.x, pos.y);
-      vel.vx = Math.cos(angle) * vel.maxSpeed;
-      vel.vy = Math.sin(angle) * vel.maxSpeed;
-    } else {
-      vel.vx *= 0.95;
-      vel.vy *= 0.95;
-    }
-    ai.targetId = null;
-  }
-
-  private executeFocusFire(
-    world: World,
-    id: number,
-    pos: PositionComponent,
-    vel: VelocityComponent,
-    weapon: WeaponComponent,
-    ai: AIComponent,
-    team: TeamComponent
-  ): void {
-    const teamFocusTarget = this.getTeamFocusTarget(world, team.team);
-    if (teamFocusTarget !== null) {
-      ai.targetId = teamFocusTarget;
-    } else {
-      const weakest = this.findWeakestEnemy(world, pos, id, team.team);
-      ai.targetId = weakest;
-    }
-
-    if (ai.targetId !== null) {
-      const targetPos = world.getComponent<PositionComponent>(ai.targetId, 'position');
-      const targetHealth = world.getComponent<HealthComponent>(ai.targetId, 'health');
-      if (!targetPos || !targetHealth || !targetHealth.alive) {
-        ai.targetId = null;
-        return;
+      const hpRatio = ship.health.hp / ship.health.maxHp;
+      if (hpRatio < ship.ai.fleeThreshold) {
+        ship.ai.targetId = null;
+        continue;
       }
 
-      const dist = distance(pos.x, pos.y, targetPos.x, targetPos.y);
-      ai.state = dist <= weapon.range ? 'attack' : 'chase';
+      let bestTarget: TargetData | null = null;
+      let bestScore = -Infinity;
 
-      if (dist > ai.preferredDistance) {
-        const [nx, ny] = normalize(targetPos.x - pos.x, targetPos.y - pos.y);
-        vel.vx = nx * vel.maxSpeed;
-        vel.vy = ny * vel.maxSpeed;
-      } else if (dist < ai.preferredDistance * 0.6) {
-        const [nx, ny] = normalize(pos.x - targetPos.x, pos.y - targetPos.y);
-        vel.vx = nx * vel.maxSpeed * 0.5;
-        vel.vy = ny * vel.maxSpeed * 0.5;
-      } else {
-        vel.vx *= 0.9;
-        vel.vy *= 0.9;
-      }
-    } else {
-      ai.state = 'idle';
-      vel.vx *= 0.95;
-      vel.vy *= 0.95;
-    }
-  }
+      for (const target of targets) {
+        if (!target.health.alive || target.id === ship.id) continue;
 
-  private executeGuerrilla(
-    world: World,
-    id: number,
-    pos: PositionComponent,
-    vel: VelocityComponent,
-    weapon: WeaponComponent,
-    ai: AIComponent,
-    team: TeamComponent
-  ): void {
-    const nearest = this.findNearestEnemy(world, pos, id);
-    if (!nearest) {
-      ai.state = 'idle';
-      ai.targetId = null;
-      vel.vx *= 0.95;
-      vel.vy *= 0.95;
-      return;
-    }
+        const dist = distance(ship.pos.x, ship.pos.y, target.pos.x, target.pos.y);
+        if (dist > ship.weapon.range * 2.5) continue;
 
-    ai.targetId = nearest.id;
-    const dist = distance(pos.x, pos.y, nearest.x, nearest.y);
+        const dpsEstimate = target.weapon.damage / target.weapon.maxCooldown;
+        const timeToKill = target.health.hp / (ship.weapon.damage / ship.weapon.maxCooldown);
+        const overkillPenalty = target.attackers >= this.maxAttackersPerTarget
+          ? (target.attackers - this.maxAttackersPerTarget + 1) * 0.3
+          : 0;
 
-    if (dist <= weapon.range && weapon.cooldown <= 0.2) {
-      ai.state = 'attack';
-      const [nx, ny] = normalize(pos.x - nearest.x, pos.y - nearest.y);
-      vel.vx = nx * vel.maxSpeed * 0.3;
-      vel.vy = ny * vel.maxSpeed * 0.3;
-    } else if (dist <= ai.preferredDistance * 0.7) {
-      ai.state = 'flee';
-      const [nx, ny] = normalize(pos.x - nearest.x, pos.y - nearest.y);
-      vel.vx = nx * vel.maxSpeed;
-      vel.vy = ny * vel.maxSpeed;
-    } else if (dist > weapon.range) {
-      ai.state = 'chase';
-      const [nx, ny] = normalize(nearest.x - pos.x, nearest.y - pos.y);
-      vel.vx = nx * vel.maxSpeed;
-      vel.vy = ny * vel.maxSpeed;
-    } else {
-      ai.state = 'attack';
-      const angle = Math.atan2(nearest.y - pos.y, nearest.x - pos.x) + Math.PI / 2;
-      vel.vx = Math.cos(angle) * vel.maxSpeed * 0.5;
-      vel.vy = Math.sin(angle) * vel.maxSpeed * 0.5;
-    }
-  }
+        let score = 0;
+        const hpFactor = 1 - target.health.hp / target.health.maxHp;
 
-  private executeDefault(
-    world: World,
-    id: number,
-    pos: PositionComponent,
-    vel: VelocityComponent,
-    weapon: WeaponComponent,
-    ai: AIComponent,
-    team: TeamComponent
-  ): void {
-    const nearest = this.findNearestEnemy(world, pos, id);
-    if (!nearest) {
-      ai.state = 'idle';
-      ai.targetId = null;
-      vel.vx *= 0.95;
-      vel.vy *= 0.95;
-      return;
-    }
+        switch (ship.ai.tacticMode) {
+          case 'focus_fire':
+            score = hpFactor * 2 - dist / 1000 - overkillPenalty * 3 + target.attackers * 0.1;
+            break;
+          case 'guerrilla':
+            score = -dist / 100 - overkillPenalty * 0.5 + hpFactor * 0.5;
+            break;
+          default:
+            score = hpFactor - dist / 500 - overkillPenalty;
+            break;
+        }
 
-    ai.targetId = nearest.id;
-    const dist = distance(pos.x, pos.y, nearest.x, nearest.y);
+        const expectedDpsToTarget = (ship.weapon.damage / ship.weapon.maxCooldown) * (1 - overkillPenalty * 0.5);
+        const willOverkill = target.health.hp < expectedDpsToTarget * this.overkillThreshold && target.attackers > 0;
+        if (willOverkill && ship.ai.tacticMode !== 'focus_fire') {
+          score -= 1.5;
+        }
 
-    if (dist > weapon.range) {
-      ai.state = 'chase';
-      const [nx, ny] = normalize(nearest.x - pos.x, nearest.y - pos.y);
-      vel.vx = nx * vel.maxSpeed;
-      vel.vy = ny * vel.maxSpeed;
-    } else if (dist < ai.preferredDistance * 0.5) {
-      ai.state = 'attack';
-      const [nx, ny] = normalize(pos.x - nearest.x, pos.y - nearest.y);
-      vel.vx = nx * vel.maxSpeed * 0.4;
-      vel.vy = ny * vel.maxSpeed * 0.4;
-    } else {
-      ai.state = 'attack';
-      const angle = Math.atan2(nearest.y - pos.y, nearest.x - pos.x) + Math.PI / 4;
-      vel.vx = Math.cos(angle) * vel.maxSpeed * 0.3;
-      vel.vy = Math.sin(angle) * vel.maxSpeed * 0.3;
-    }
-  }
-
-  private findNearestEnemy(
-    world: World,
-    selfPos: PositionComponent,
-    selfId: number
-  ): { id: number; x: number; y: number } | null {
-    let nearest: { id: number; x: number; y: number } | null = null;
-    let nearestDist = Infinity;
-
-    const enemies = world.getEntitiesWith('position', 'health', 'team');
-    const selfTeam = world.getComponent<TeamComponent>(selfId, 'team');
-    if (!selfTeam) return null;
-
-    for (const eid of enemies) {
-      if (eid === selfId) continue;
-      const eTeam = world.getComponent<TeamComponent>(eid, 'team');
-      const ePos = world.getComponent<PositionComponent>(eid, 'position');
-      const eHealth = world.getComponent<HealthComponent>(eid, 'health');
-      if (!eTeam || eTeam.team === selfTeam.team || !ePos || !eHealth || !eHealth.alive) continue;
-
-      const dist = distance(selfPos.x, selfPos.y, ePos.x, ePos.y);
-      if (dist < nearestDist) {
-        nearestDist = dist;
-        nearest = { id: eid, x: ePos.x, y: ePos.y };
-      }
-    }
-    return nearest;
-  }
-
-  private findWeakestEnemy(
-    world: World,
-    selfPos: PositionComponent,
-    selfId: number,
-    selfTeam: 'red' | 'blue'
-  ): number | null {
-    let weakestId: number | null = null;
-    let lowestHp = Infinity;
-
-    const enemies = world.getEntitiesWith('position', 'health', 'team');
-    for (const eid of enemies) {
-      if (eid === selfId) continue;
-      const eTeam = world.getComponent<TeamComponent>(eid, 'team');
-      const ePos = world.getComponent<PositionComponent>(eid, 'position');
-      const eHealth = world.getComponent<HealthComponent>(eid, 'health');
-      if (!eTeam || eTeam.team === selfTeam || !ePos || !eHealth || !eHealth.alive) continue;
-
-      if (eHealth.hp < lowestHp) {
-        lowestHp = eHealth.hp;
-        weakestId = eid;
-      }
-    }
-    return weakestId;
-  }
-
-  private getTeamFocusTarget(world: World, team: 'red' | 'blue'): number | null {
-    const allies = world.getEntitiesWith('ai', 'team');
-    const targetCounts = new Map<number, number>();
-
-    for (const aid of allies) {
-      const aTeam = world.getComponent<TeamComponent>(aid, 'team');
-      const aAi = world.getComponent<AIComponent>(aid, 'ai');
-      if (!aTeam || aTeam.team !== team || !aAi || aAi.targetId === null) continue;
-
-      const tHealth = world.getComponent<HealthComponent>(aAi.targetId, 'health');
-      if (!tHealth || !tHealth.alive) continue;
-
-      targetCounts.set(aAi.targetId, (targetCounts.get(aAi.targetId) ?? 0) + 1);
-    }
-
-    if (targetCounts.size > 0) {
-      let maxTarget: number | null = null;
-      let maxCount = 0;
-      for (const [targetId, count] of targetCounts) {
-        if (count > maxCount) {
-          maxCount = count;
-          maxTarget = targetId;
+        if (score > bestScore) {
+          bestScore = score;
+          bestTarget = target;
         }
       }
-      return maxTarget;
+
+      if (bestTarget) {
+        ship.ai.targetId = bestTarget.id;
+        bestTarget.attackers++;
+      } else {
+        ship.ai.targetId = this.findNearestTarget(ship, targets);
+        if (ship.ai.targetId !== null) {
+          const t = targets.find((t) => t.id === ship.ai.targetId);
+          if (t) t.attackers++;
+        }
+      }
     }
-    return null;
+  }
+
+  private findNearestTarget(ship: ShipData, targets: TargetData[]): number | null {
+    let nearestId: number | null = null;
+    let nearestDist = Infinity;
+
+    for (const target of targets) {
+      if (!target.health.alive || target.id === ship.id) continue;
+      const dist = distance(ship.pos.x, ship.pos.y, target.pos.x, target.pos.y);
+      if (dist < nearestDist) {
+        nearestDist = dist;
+        nearestId = target.id;
+      }
+    }
+    return nearestId;
+  }
+
+  private updateBehaviors(): void {
+    for (const ship of this.redShips) {
+      this.updateShipBehavior(ship);
+    }
+    for (const ship of this.blueShips) {
+      this.updateShipBehavior(ship);
+    }
+  }
+
+  private updateShipBehavior(ship: ShipData): void {
+    if (!ship.health.alive) return;
+
+    const hpRatio = ship.health.hp / ship.health.maxHp;
+
+    if (hpRatio < ship.ai.fleeThreshold) {
+      this.executeFlee(ship);
+      return;
+    }
+
+    if (ship.ai.targetId === null) {
+      ship.ai.state = 'idle';
+      ship.vel.vx *= 0.95;
+      ship.vel.vy *= 0.95;
+      return;
+    }
+
+    const targetPos = this.getTargetPos(ship);
+    if (!targetPos) {
+      ship.ai.targetId = null;
+      ship.ai.state = 'idle';
+      return;
+    }
+
+    const dist = distance(ship.pos.x, ship.pos.y, targetPos.x, targetPos.y);
+
+    switch (ship.ai.tacticMode) {
+      case 'focus_fire':
+        this.focusFireBehavior(ship, targetPos, dist);
+        break;
+      case 'guerrilla':
+        this.guerrillaBehavior(ship, targetPos, dist);
+        break;
+      default:
+        this.defaultBehavior(ship, targetPos, dist);
+        break;
+    }
+  }
+
+  private getTargetPos(ship: ShipData): PositionComponent | null {
+    const targets = ship.team.team === 'red' ? this.blueTargets : this.redTargets;
+    const target = targets.find((t) => t.id === ship.ai.targetId);
+    return target?.health.alive ? target.pos : null;
+  }
+
+  private executeFlee(ship: ShipData): void {
+    ship.ai.state = 'flee';
+    const enemies = ship.team.team === 'red' ? this.blueTargets : this.redTargets;
+    let nearest: { x: number; y: number } | null = null;
+    let nearestDist = Infinity;
+
+    for (const e of enemies) {
+      if (!e.health.alive) continue;
+      const dist = distance(ship.pos.x, ship.pos.y, e.pos.x, e.pos.y);
+      if (dist < nearestDist) {
+        nearestDist = dist;
+        nearest = { x: e.pos.x, y: e.pos.y };
+      }
+    }
+
+    if (nearest) {
+      const [nx, ny] = normalize(ship.pos.x - nearest.x, ship.pos.y - nearest.y);
+      ship.vel.vx = nx * ship.vel.maxSpeed;
+      ship.vel.vy = ny * ship.vel.maxSpeed;
+    } else {
+      ship.vel.vx *= 0.95;
+      ship.vel.vy *= 0.95;
+    }
+  }
+
+  private focusFireBehavior(ship: ShipData, target: PositionComponent, dist: number): void {
+    ship.ai.state = dist <= ship.weapon.range ? 'attack' : 'chase';
+
+    if (dist > ship.ai.preferredDistance) {
+      const [nx, ny] = normalize(target.x - ship.pos.x, target.y - ship.pos.y);
+      ship.vel.vx = nx * ship.vel.maxSpeed;
+      ship.vel.vy = ny * ship.vel.maxSpeed;
+    } else if (dist < ship.ai.preferredDistance * 0.5) {
+      const [nx, ny] = normalize(ship.pos.x - target.x, ship.pos.y - target.y);
+      ship.vel.vx = nx * ship.vel.maxSpeed * 0.4;
+      ship.vel.vy = ny * ship.vel.maxSpeed * 0.4;
+    } else {
+      const angle = Math.atan2(target.y - ship.pos.y, target.x - ship.pos.x) + Math.PI / 3;
+      ship.vel.vx = Math.cos(angle) * ship.vel.maxSpeed * 0.5;
+      ship.vel.vy = Math.sin(angle) * ship.vel.maxSpeed * 0.5;
+    }
+  }
+
+  private guerrillaBehavior(ship: ShipData, target: PositionComponent, dist: number): void {
+    if (dist <= ship.weapon.range && ship.weapon.cooldown <= 0.2) {
+      ship.ai.state = 'attack';
+      const [nx, ny] = normalize(ship.pos.x - target.x, ship.pos.y - target.y);
+      ship.vel.vx = nx * ship.vel.maxSpeed * 0.2;
+      ship.vel.vy = ny * ship.vel.maxSpeed * 0.2;
+    } else if (dist <= ship.ai.preferredDistance * 0.6) {
+      ship.ai.state = 'flee';
+      const [nx, ny] = normalize(ship.pos.x - target.x, ship.pos.y - target.y);
+      ship.vel.vx = nx * ship.vel.maxSpeed;
+      ship.vel.vy = ny * ship.vel.maxSpeed;
+    } else if (dist > ship.weapon.range * 1.1) {
+      ship.ai.state = 'chase';
+      const [nx, ny] = normalize(target.x - ship.pos.x, target.y - ship.pos.y);
+      ship.vel.vx = nx * ship.vel.maxSpeed;
+      ship.vel.vy = ny * ship.vel.maxSpeed;
+    } else {
+      ship.ai.state = 'attack';
+      const angle = Math.atan2(target.y - ship.pos.y, target.x - ship.pos.x) + Math.PI / 2;
+      ship.vel.vx = Math.cos(angle) * ship.vel.maxSpeed * 0.6;
+      ship.vel.vy = Math.sin(angle) * ship.vel.maxSpeed * 0.6;
+    }
+  }
+
+  private defaultBehavior(ship: ShipData, target: PositionComponent, dist: number): void {
+    if (dist > ship.weapon.range) {
+      ship.ai.state = 'chase';
+      const [nx, ny] = normalize(target.x - ship.pos.x, target.y - ship.pos.y);
+      ship.vel.vx = nx * ship.vel.maxSpeed;
+      ship.vel.vy = ny * ship.vel.maxSpeed;
+    } else if (dist < ship.ai.preferredDistance * 0.4) {
+      ship.ai.state = 'attack';
+      const [nx, ny] = normalize(ship.pos.x - target.x, ship.pos.y - target.y);
+      ship.vel.vx = nx * ship.vel.maxSpeed * 0.3;
+      ship.vel.vy = ny * ship.vel.maxSpeed * 0.3;
+    } else {
+      ship.ai.state = 'attack';
+      const angle = Math.atan2(target.y - ship.pos.y, target.x - ship.pos.x) + Math.PI / 4;
+      ship.vel.vx = Math.cos(angle) * ship.vel.maxSpeed * 0.4;
+      ship.vel.vy = Math.sin(angle) * ship.vel.maxSpeed * 0.4;
+    }
   }
 }

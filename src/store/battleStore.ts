@@ -87,13 +87,13 @@ export const useBattleStore = create<BattleStore>((set, get) => ({
   setRedCount: (count) => {
     const { simState } = get();
     if (simState !== 'idle') return;
-    set({ redCount: Math.max(1, Math.min(20, count)) });
+    set({ redCount: Math.max(1, Math.min(100, count)) });
   },
 
   setBlueCount: (count) => {
     const { simState } = get();
     if (simState !== 'idle') return;
-    set({ blueCount: Math.max(1, Math.min(20, count)) });
+    set({ blueCount: Math.max(1, Math.min(100, count)) });
   },
 
   setRedTactic: (tactic) => {

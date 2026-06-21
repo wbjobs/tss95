@@ -49,7 +49,7 @@ function TeamPanel({ team }: { team: Team }) {
               <button
                 onClick={() => setCount(count + 1)}
                 className={`w-7 h-7 flex items-center justify-center rounded ${btnBg} transition-colors`}
-                disabled={count >= 20}
+                disabled={count >= 100}
               >
                 <Plus size={12} />
               </button>

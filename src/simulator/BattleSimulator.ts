@@ -45,6 +45,10 @@ export class BattleSimulator {
   private lastDamageEventIdx: number = 0;
   private lastKillEventIdx: number = 0;
 
+  perfTimings: { ai: number; attack: number; movement: number; collision: number; total: number } = {
+    ai: 0, attack: 0, movement: 0, collision: 0, total: 0
+  };
+
   constructor(width: number, height: number) {
     this.width = width;
     this.height = height;
@@ -129,7 +133,24 @@ export class BattleSimulator {
     if (!this.isRunning || this.isFinished) return;
 
     this.battleTime += dt;
-    this.world.update(dt);
+
+    const t0 = performance.now();
+
+    const t1 = performance.now();
+    this.aiDecisionSystem.update(this.world, dt);
+    const t2 = performance.now();
+    this.attackSystem.update(this.world, dt);
+    const t3 = performance.now();
+    this.movementSystem.update(this.world, dt);
+    const t4 = performance.now();
+    this.collisionSystem.update(this.world, dt);
+    const t5 = performance.now();
+
+    this.perfTimings.ai = t2 - t1;
+    this.perfTimings.attack = t3 - t2;
+    this.perfTimings.movement = t4 - t3;
+    this.perfTimings.collision = t5 - t4;
+    this.perfTimings.total = t5 - t0;
 
     this.processNewDamageEvents();
     this.processNewKillEvents();

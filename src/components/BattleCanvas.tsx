@@ -7,6 +7,12 @@ export default function BattleCanvas() {
   const containerRef = useRef<HTMLDivElement>(null);
   const animFrameRef = useRef<number>(0);
   const lastTimeRef = useRef<number>(0);
+  const fpsRef = useRef<number>(0);
+  const fpsAccumRef = useRef<number>(0);
+  const fpsFramesRef = useRef<number>(0);
+  const perfRef = useRef<{ update: number; render: number; ai: number; collision: number; attack: number; movement: number }>({
+    update: 0, render: 0, ai: 0, collision: 0, attack: 0, movement: 0
+  });
 
   const simulator = useBattleStore((s) => s.simulator);
   const speed = useBattleStore((s) => s.speed);
@@ -67,6 +73,7 @@ export default function BattleCanvas() {
       let dt = (timestamp - lastTimeRef.current) / 1000;
       lastTimeRef.current = timestamp;
 
+      const realDt = dt;
       dt = Math.min(dt, 0.05) * speed;
 
       const canvas = canvasRef.current;
@@ -86,6 +93,40 @@ export default function BattleCanvas() {
       simulator.renderSystem.update(simulator.world, dt);
       simulator.renderSystem.renderProjectiles(simulator.attackSystem.projectiles);
       simulator.renderSystem.renderExplosions(dt);
+
+      fpsFramesRef.current++;
+      fpsAccumRef.current += realDt;
+      if (fpsAccumRef.current >= 0.3) {
+        fpsRef.current = fpsFramesRef.current / fpsAccumRef.current;
+        fpsFramesRef.current = 0;
+        fpsAccumRef.current = 0;
+      }
+
+      perfRef.current = {
+        update: simulator.perfTimings.total,
+        render: 0,
+        ai: simulator.perfTimings.ai,
+        collision: simulator.perfTimings.collision,
+        attack: simulator.perfTimings.attack,
+        movement: simulator.perfTimings.movement,
+      };
+
+      ctx.save();
+      ctx.font = '12px "Source Code Pro", monospace';
+      ctx.fillStyle = 'rgba(0, 255, 136, 0.8)';
+      ctx.textAlign = 'left';
+      const px = 12, py = 24;
+      const lineH = 16;
+      ctx.fillText(`FPS: ${fpsRef.current.toFixed(0)}`, px, py);
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+      ctx.fillText(`AI: ${perfRef.current.ai.toFixed(2)}ms`, px, py + lineH);
+      ctx.fillText(`Attack: ${perfRef.current.attack.toFixed(2)}ms`, px, py + lineH * 2);
+      ctx.fillText(`Movement: ${perfRef.current.movement.toFixed(2)}ms`, px, py + lineH * 3);
+      ctx.fillText(`Collision: ${perfRef.current.collision.toFixed(2)}ms`, px, py + lineH * 4);
+      ctx.fillText(`Total: ${perfRef.current.update.toFixed(2)}ms`, px, py + lineH * 5);
+      const shipCount = simulator.world.getEntityCount();
+      ctx.fillText(`Ships: ${shipCount}`, px, py + lineH * 6);
+      ctx.restore();
 
       updateStats();
 

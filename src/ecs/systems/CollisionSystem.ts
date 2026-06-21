@@ -4,7 +4,6 @@ import type { PositionComponent } from '../components/PositionComponent';
 import type { HealthComponent } from '../components/HealthComponent';
 import type { RenderComponent } from '../components/RenderComponent';
 import { SpatialHash } from '../../utils/spatialHash';
-import { distance } from '../../utils/math';
 
 export interface CollisionEvent {
   entityId1: number;
@@ -12,14 +11,28 @@ export interface CollisionEvent {
   distance: number;
 }
 
+interface ShipInfo {
+  id: number;
+  x: number;
+  y: number;
+  pos: PositionComponent;
+  health: HealthComponent;
+  render: RenderComponent;
+  radius: number;
+}
+
 export class CollisionSystem extends System {
   readonly requiredComponents = ['position', 'health'];
   private spatialHash: SpatialHash;
   private _collisions: CollisionEvent[] = [];
+  private shipCache: ShipInfo[] = [];
+  private shipMap: Map<number, ShipInfo> = new Map();
+  private queryBuffer: number[] = [];
+  private cacheCount: number = 0;
 
   constructor() {
     super();
-    this.spatialHash = new SpatialHash(80);
+    this.spatialHash = new SpatialHash(60, 500);
   }
 
   get collisions(): CollisionEvent[] {
@@ -29,59 +42,72 @@ export class CollisionSystem extends System {
   update(world: World, _dt: number): void {
     this._collisions = [];
     this.spatialHash.clear();
+    this.shipMap.clear();
+    this.cacheCount = 0;
 
-    const entities = world.getEntitiesWith('position', 'health');
+    const entities = world.getEntitiesWith('position', 'health', 'render');
 
     for (const id of entities) {
       const pos = world.getComponent<PositionComponent>(id, 'position');
       const health = world.getComponent<HealthComponent>(id, 'health');
-      if (!pos || !health || !health.alive) continue;
+      const render = world.getComponent<RenderComponent>(id, 'render');
+      if (!pos || !health || !render || !health.alive) continue;
+
+      let info = this.shipCache[this.cacheCount];
+      if (!info) {
+        info = { id, x: 0, y: 0, pos, health, render, radius: 0 };
+        this.shipCache[this.cacheCount] = info;
+      } else {
+        info.id = id;
+        info.pos = pos;
+        info.health = health;
+        info.render = render;
+      }
+      info.x = pos.x;
+      info.y = pos.y;
+      info.radius = render.size;
+      this.shipMap.set(id, info);
+      this.cacheCount++;
+
       this.spatialHash.insert(pos.x, pos.y, id);
     }
 
-    const checked = new Set<string>();
-    for (const id of entities) {
-      const pos = world.getComponent<PositionComponent>(id, 'position');
-      const render = world.getComponent<RenderComponent>(id, 'render');
-      const health = world.getComponent<HealthComponent>(id, 'health');
-      if (!pos || !health || !health.alive) continue;
+    for (let i = 0; i < this.cacheCount; i++) {
+      const shipA = this.shipCache[i];
+      if (!shipA || !shipA.health.alive) continue;
 
-      const radius = render ? render.size : 10;
-      const nearby = this.spatialHash.query(pos.x, pos.y, radius * 3);
+      const queryCount = this.spatialHash.query(
+        shipA.x, shipA.y, shipA.radius * 3, this.queryBuffer);
 
-      for (const otherId of nearby) {
-        if (otherId === id) continue;
-        const key = id < otherId ? `${id}-${otherId}` : `${otherId}-${id}`;
-        if (checked.has(key)) continue;
-        checked.add(key);
+      for (let j = 0; j < queryCount; j++) {
+        const otherId = this.queryBuffer[j];
+        if (otherId <= shipA.id) continue;
 
-        const otherPos = world.getComponent<PositionComponent>(otherId, 'position');
-        const otherRender = world.getComponent<RenderComponent>(otherId, 'render');
-        const otherHealth = world.getComponent<HealthComponent>(otherId, 'health');
-        if (!otherPos || !otherHealth || !otherHealth.alive) continue;
+        const shipB = this.shipMap.get(otherId);
+        if (!shipB || !shipB.health.alive) continue;
 
-        const dist = distance(pos.x, pos.y, otherPos.x, otherPos.y);
-        const otherRadius = otherRender ? otherRender.size : 10;
-        const minDist = radius + otherRadius;
+        const dx = shipB.x - shipA.x;
+        const dy = shipB.y - shipA.y;
+        const distSq = dx * dx + dy * dy;
+        const minDist = shipA.radius + shipB.radius;
+        const minDistSq = minDist * minDist;
 
-        if (dist < minDist) {
+        if (distSq < minDistSq && distSq > 0.0001) {
+          const dist = Math.sqrt(distSq);
           this._collisions.push({
-            entityId1: id,
-            entityId2: otherId,
+            entityId1: shipA.id,
+            entityId2: shipB.id,
             distance: dist,
           });
 
           const overlap = minDist - dist;
-          const dx = otherPos.x - pos.x;
-          const dy = otherPos.y - pos.y;
-          const len = Math.sqrt(dx * dx + dy * dy) || 1;
-          const pushX = (dx / len) * overlap * 0.5;
-          const pushY = (dy / len) * overlap * 0.5;
+          const pushX = (dx / dist) * overlap * 0.5;
+          const pushY = (dy / dist) * overlap * 0.5;
 
-          pos.x -= pushX;
-          pos.y -= pushY;
-          otherPos.x += pushX;
-          otherPos.y += pushY;
+          shipA.pos.x -= pushX;
+          shipA.pos.y -= pushY;
+          shipB.pos.x += pushX;
+          shipB.pos.y += pushY;
         }
       }
     }

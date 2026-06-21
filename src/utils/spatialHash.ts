@@ -1,18 +1,22 @@
 export class SpatialHash {
   private cellSize: number;
-  private cells: Map<string, number[]>;
+  private cells: Map<number, number[]>;
+  private cols: number;
+  private _version: number = 0;
 
-  constructor(cellSize: number = 100) {
+  constructor(cellSize: number = 100, cols: number = 200) {
     this.cellSize = cellSize;
+    this.cols = cols;
     this.cells = new Map();
   }
 
   clear(): void {
     this.cells.clear();
+    this._version++;
   }
 
-  private key(cx: number, cy: number): string {
-    return `${cx},${cy}`;
+  private key(cx: number, cy: number): number {
+    return cy * this.cols + cx;
   }
 
   insert(x: number, y: number, id: number): void {
@@ -27,23 +31,23 @@ export class SpatialHash {
     cell.push(id);
   }
 
-  query(x: number, y: number, radius: number): number[] {
-    const result: number[] = [];
+  query(x: number, y: number, radius: number, out: number[]): number {
     const minCx = Math.floor((x - radius) / this.cellSize);
     const maxCx = Math.floor((x + radius) / this.cellSize);
     const minCy = Math.floor((y - radius) / this.cellSize);
     const maxCy = Math.floor((y + radius) / this.cellSize);
 
+    let count = 0;
     for (let cx = minCx; cx <= maxCx; cx++) {
       for (let cy = minCy; cy <= maxCy; cy++) {
         const cell = this.cells.get(this.key(cx, cy));
         if (cell) {
-          for (const id of cell) {
-            result.push(id);
+          for (let i = 0; i < cell.length; i++) {
+            out[count++] = cell[i];
           }
         }
       }
     }
-    return result;
+    return count;
   }
 }
